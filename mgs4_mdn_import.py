@@ -52,21 +52,24 @@ def create_armature(bones, name="MDN_Armature"):
     armature = bpy.data.armatures.new(name)
     armature_obj = bpy.data.objects.new(name, armature)
     bpy.context.collection.objects.link(armature_obj)
-    
+   
     bpy.context.view_layer.objects.active = armature_obj
     bpy.ops.object.mode_set(mode='EDIT')
-    
+   
     edit_bones = armature.edit_bones
     bone_list = {}
-    
+   
     for idx, mdn_bone in enumerate(bones):
         bone_name = f"{mdn_bone.strcode:08X}"
         edit_bone = edit_bones.new(bone_name)
         bone_list[idx] = edit_bone
-        
+       
+        edit_bone["idx"] = idx # temp fix
+
         pos = mathutils.Vector(mdn_bone.worldPos[:3])
+
         edit_bone.head = pos
-        
+
         if mdn_bone.parent >= 0 and mdn_bone.parent < len(bones):
             parent_pos = mathutils.Vector(bones[mdn_bone.parent].worldPos[:3])
             if (parent_pos - pos).length < 0.001:
@@ -75,13 +78,13 @@ def create_armature(bones, name="MDN_Armature"):
                 edit_bone.tail = parent_pos
         else:
             edit_bone.tail = pos + mathutils.Vector((0, 0, 0.1))
-            
+
     for idx, mdn_bone in enumerate(bones):
         if mdn_bone.parent >= 0 and mdn_bone.parent < len(bones):
             bone_list[idx].parent = bone_list[mdn_bone.parent]
-    
+   
     bpy.ops.object.mode_set(mode='OBJECT')
-    
+   
     return armature_obj, armature.bones
 
 def setup_bone_weights(mesh_obj, bone_weights, bone_indices, bones):
@@ -250,7 +253,7 @@ def read_vertex_buffer(reader, vertex_def, num_vertices):
                     y = parse_vertex_component(reader, def_type, vert_start, pos + 4)
                     z = parse_vertex_component(reader, def_type, vert_start, pos + 8)
                     vertex_data['pos'] = (x, y, z)
-                    
+
                 elif component_type == MDN_Definition.NORMAL or component_type == MDN_Definition.TANGENT:
                     reader.seek(vert_start + pos)
                     if type_format == MDN_DataType.FLOAT_COMPRESSED:
@@ -300,7 +303,6 @@ def read_vertex_buffer(reader, vertex_def, num_vertices):
                         uv_index = component_type - MDN_Definition.TEXTURE00
                     
                     uvs[f'UV{uv_index}'].append((u, v))
-
                 
                 elif component_type == MDN_Definition.WEIGHT:
                     weights = [
@@ -312,6 +314,9 @@ def read_vertex_buffer(reader, vertex_def, num_vertices):
                     weight_sum = sum(weights)
                     if weight_sum > 0:
                         weights = [w / weight_sum for w in weights]
+
+                    #print(f"[{v}] = {weights}")
+
                     vertex_data['weights'] = weights
                     
                 elif component_type == MDN_Definition.BONEIDX:
@@ -322,6 +327,7 @@ def read_vertex_buffer(reader, vertex_def, num_vertices):
                         reader.read_uint8(),
                         reader.read_uint8()
                     ]
+                    #print(f"[{v}] = {bones}")
                     vertex_data['bones'] = bones
                     
             except Exception as e:
@@ -370,7 +376,6 @@ def apply_mesh_data(mesh_obj, vertices, normals, tangents, face_indices, use_smo
         tangent_data = []
         for t in tangents:
             tangent_data.extend([t[0], t[1], t[2]])
-        mesh_obj["imported_tangents"] = tangent_data
 
     mesh.validate()
     mesh.update()

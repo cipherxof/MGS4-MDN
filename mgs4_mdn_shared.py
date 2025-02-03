@@ -159,6 +159,9 @@ class BinaryWriter:
     def write_uint8(self, value):
         self.write_bytes(struct.pack(f'{self.endian}B', value))
 
+    def write_int8(self, value):
+        self.write_bytes(struct.pack(f'{self.endian}b', value))
+
     def write_float(self, value):
         self.write_bytes(struct.pack(f'{self.endian}f', value))
         

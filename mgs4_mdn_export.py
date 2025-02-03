@@ -18,16 +18,6 @@ bl_info = {
 
 MODEL_EXPORT_SCALE = 1.0
 
-def collect_vertex_groups(mesh_obj, bones):
-    bone_name_to_idx = {}
-    
-    for i, bone in enumerate(bones):
-        bone_name = f"{bone.strcode:08X}"
-        bone_name_to_idx[bone_name] = i
-        bone_name_to_idx[f"{bone.strcode:X}"] = i
-    
-    return bone_name_to_idx
-
 def write_face_buffer(writer, mesh_obj):
     if not mesh_obj.data.loop_triangles:
         mesh_obj.data.calc_loop_triangles()
@@ -69,24 +59,25 @@ def create_skin_data(mesh_obj, bone_name_to_idx, max_bones=32):
 def collect_bones(armature_obj):
     if not armature_obj or armature_obj.type != 'ARMATURE':
         return []
-        
+       
     bones = []
-    bone_mapping = {}
-    
+    bone_name_to_idx = {}
+   
     for idx, bone in enumerate(armature_obj.data.bones):
+        real_idx = bone["idx"] # temp fix
+       
         mdn_bone = MDN_Bone()
         mdn_bone.strcode = strcode_from_name(bone.name)
-        
-        world_mat = armature_obj.matrix_world @ bone.matrix_local
-        world_pos = world_mat.translation
-        mdn_bone.worldPos = [world_pos.x, world_pos.y, world_pos.z, 1.0]
-        
+        mdn_bone.real_idx = real_idx 
         mdn_bone.flag = 0
         mdn_bone.parent = 0xFFFFFFFF
         mdn_bone.pad = 0
-        
-        head = world_mat @ bone.head_local
-        tail = world_mat @ bone.tail_local
+       
+        head = bone.head_local
+        tail = bone.tail_local
+       
+        mdn_bone.worldPos = [head.x, head.y, head.z, 1.0]
+        mdn_bone.parentPos = [tail.x, tail.y, tail.z, 1.0]
         
         padding = 0.1
         min_bounds = [
@@ -101,21 +92,19 @@ def collect_bones(armature_obj):
             max(head.z, tail.z) + padding,
             1.0
         ]
-        
+       
         mdn_bone.min = min_bounds
         mdn_bone.max = max_bounds
-        
-        mdn_bone.parentPos = [0.0, 0.0, 0.0, 1.0]
-        
+       
         bones.append(mdn_bone)
-        bone_mapping[bone.name] = idx
-    
+        bone_name_to_idx[bone.name] = real_idx
+        
     for idx, bone in enumerate(armature_obj.data.bones):
         if bone.parent:
-            parent_idx = bone_mapping.get(bone.parent.name, -1)
+            parent_idx = bone_name_to_idx.get(bone.parent.name, -1)
             if parent_idx != -1:
                 bones[idx].parent = parent_idx
-                
+
                 parent_world_pos = armature_obj.matrix_world @ bone.parent.head_local
                 bones[idx].parentPos = [
                     parent_world_pos.x,
@@ -123,8 +112,10 @@ def collect_bones(armature_obj):
                     parent_world_pos.z,
                     1.0
                 ]
-    
-    return bones
+
+    bones.sort(key=lambda x: x.real_idx)
+   
+    return bones, bone_name_to_idx
 
 def collect_groups(meshes, armature_obj=None):
     groups = []
@@ -431,7 +422,7 @@ def create_default_material(material):
 def to_dec(a: int, b: int, c: int) -> int:
     return ((c & 0x3FF) << 22) | ((b & 0x7FF) << 11) | (a & 0x7FF)
 
-def write_skins(writer, meshes, bones):
+def write_skins(writer, meshes, bone_name_to_idx):
     writer.pad_to_alignment(16)
     skin_offset = writer.get_offset()
     skins = []
@@ -474,7 +465,6 @@ def write_skins(writer, meshes, bones):
             mesh_obj["mdn_skin_index"] = skin_lookup[vgroup_names]
         else:
             print("Creating new skin")
-            bone_name_to_idx = collect_vertex_groups(mesh_obj, bones)
             skin = create_skin_data(mesh_obj, bone_name_to_idx)
             skin_lookup[vgroup_names] = len(skins)
             mesh_obj["mdn_skin_index"] = len(skins)
@@ -528,7 +518,7 @@ def create_vertex_definition(mesh_obj):
 
     # 4. BoneIdx
     if mesh_obj.vertex_groups and any(v.groups for v in mesh.vertices):
-        definition.append(MDN_DataType.UBYTE << 4 | MDN_Definition.BONEIDX)
+        definition.append(MDN_DataType.BYTE << 4 | MDN_Definition.BONEIDX)
         position.append(current_offset)
         current_offset += 4
 
@@ -690,8 +680,7 @@ def write_vertex_data(writer, mesh_obj, vertex_def):
 
             elif component_type == MDN_Definition.WEIGHT:
                 if vertex.groups:
-                    groups = sorted([(g.group, g.weight) for g in vertex.groups],
-                                    key=lambda x: x[1], reverse=True)[:4]
+                    groups = [(g.group, g.weight) for g in vertex.groups][:4]
                     total = sum(weight for _, weight in groups)
                     for _, weight in groups:
                         writer.write_uint8(int((weight / total if total > 0 else 0) * 255))
@@ -703,15 +692,15 @@ def write_vertex_data(writer, mesh_obj, vertex_def):
 
             elif component_type == MDN_Definition.BONEIDX:
                 if vertex.groups:
-                    groups = sorted([(g.group, g.weight) for g in vertex.groups],
-                                    key=lambda x: x[1], reverse=True)[:4]
+                    groups = [(g.group, g.weight) for g in vertex.groups][:4]
+                    
                     for group_idx, _ in groups:
-                        writer.write_uint8(group_idx)
+                        writer.write_int8(group_idx)
                     for _ in range(4 - len(groups)):
-                        writer.write_uint8(0)
+                        writer.write_int8(0)
                 else:
                     for _ in range(4):
-                        writer.write_uint8(0)
+                        writer.write_int8(0)
 
             if writer.offset > end_pos:
                 end_pos = writer.offset
@@ -754,7 +743,7 @@ class ExportMDN(Operator, ExportHelper):
                 if armature_obj:
                     break
 
-        bones = collect_bones(armature_obj) if armature_obj else []
+        bones, bone_name_to_idx = collect_bones(armature_obj) if armature_obj else ([], {})
         groups, mesh_to_group = collect_groups(meshes, armature_obj)
         bounds_min, bounds_max = calculate_world_bounds(meshes)
 
@@ -891,7 +880,7 @@ class ExportMDN(Operator, ExportHelper):
         writer.pad_to_alignment(16)
         header.skinOffset = writer.get_offset()
         if bones:
-            header.skinOffset, skins = write_skins(writer, meshes, bones)
+            header.skinOffset, skins = write_skins(writer, meshes, bone_name_to_idx)
             header.numSkin = len(skins)
         else:
             header.numSkin = 0
