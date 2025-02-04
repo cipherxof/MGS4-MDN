@@ -134,8 +134,8 @@ def collect_bones(armature_obj):
    
     for idx, bone in enumerate(armature_obj.data.bones):
         if "bone_table_index" not in bone:
-            print(f"Warning: bone {bone.name} has no table index, skipping...")
-            continue
+            print(f"Warning: bone {bone.name} has no table index, assigning the default value")
+            bone["bone_table_index"] = idx
 
         mdn_bone = MDN_Bone()
         mdn_bone.strcode = strcode_from_name(bone.name)
