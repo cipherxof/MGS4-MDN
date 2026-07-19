@@ -19,6 +19,9 @@ bl_info = {
 
 MODEL_EXPORT_SCALE = 1.0
 
+def blender_to_game(vector):
+    return mathutils.Vector((vector.x, vector.z, -vector.y))
+
 def write_face_buffer(writer, mesh_obj):
     if not mesh_obj.data.loop_triangles:
         mesh_obj.data.calc_loop_triangles()
@@ -39,9 +42,8 @@ def write_face_buffer(writer, mesh_obj):
             writer.write_uint16(tri.vertices[0])
             writer.write_uint16(tri.vertices[1])
             writer.write_uint16(tri.vertices[2])
-        
-        writer.pad_to_alignment(16)
-        total_size += ((len(triangles) * 6 + 15) & ~15)
+
+        total_size += len(triangles) * 6
     
     return total_size
 
@@ -277,15 +279,13 @@ def get_mesh_bounds(mesh_obj):
     bounds_min = [float('inf')] * 3
     bounds_max = [float('-inf')] * 3
     
-    loc, rot, scale = mesh_obj.matrix_world.decompose()
-    
-    rot_mat = rot.to_matrix().to_4x4()
+    unit_scale = bpy.context.scene.unit_settings.scale_length
+    game_scale = MODEL_EXPORT_SCALE * unit_scale
     
     for vertex in mesh_obj.data.vertices:
-        rotated = rot_mat @ vertex.co
-        world_pos = rotated + loc
-        
-        game_co = (world_pos[0], world_pos[1], world_pos[2])
+        world_pos = mesh_obj.matrix_world @ vertex.co
+        game_pos = blender_to_game(world_pos) * game_scale
+        game_co = (game_pos.x, game_pos.y, game_pos.z)
         
         for i in range(3):
             bounds_min[i] = min(bounds_min[i], game_co[i])
@@ -638,6 +638,8 @@ def write_vertex_data(writer, mesh_obj, vertex_def, bone_name_to_idx):
 
     vertex_tangents = calculate_tangents(mesh_obj)
     vertex_normals = calculate_normals(mesh_obj)
+    normal_matrix = mesh_obj.matrix_world.to_3x3().inverted_safe().transposed()
+    tangent_matrix = mesh_obj.matrix_world.to_3x3()
 
     vertex_colors = {}
     if mesh.vertex_colors:
@@ -675,15 +677,17 @@ def write_vertex_data(writer, mesh_obj, vertex_def, bone_name_to_idx):
 
             if component_type == MDN_Definition.POSITION:
                 world_vertex = mesh_obj.matrix_world @ vertex.co
-                scaled_vertex = world_vertex * game_scale
+                scaled_vertex = blender_to_game(world_vertex) * game_scale
                 writer.write_vec3(scaled_vertex.x, scaled_vertex.y, scaled_vertex.z)
 
             elif component_type == MDN_Definition.NORMAL:
                 normal = vertex_normals.get(vertex_idx, mathutils.Vector((0, 0, 1)))
+                normal = blender_to_game(normal_matrix @ normal)
                 writer.write_uint32(normalize_and_compress_vector(normal))
 
             elif component_type == MDN_Definition.TANGENT:
                 tangent = vertex_tangents.get(vertex_idx, mathutils.Vector((1, 0, 0)))
+                tangent = blender_to_game(tangent_matrix @ tangent)
                 writer.write_uint32(normalize_and_compress_vector(tangent))
 
             elif component_type == MDN_Definition.COLOR:
@@ -826,7 +830,7 @@ class ExportMDN(Operator, ExportHelper):
                     size=len(mesh_obj.data.vertices)
                 )
                 faces.append(face)
-                current_face_offset += ((face_count * 2 + 15) & ~15)
+                current_face_offset += face_count * 2
 
         basename = os.path.splitext(os.path.basename(filepath))[0]
 
@@ -864,19 +868,21 @@ class ExportMDN(Operator, ExportHelper):
             bounds_min, bounds_max = get_mesh_bounds(mesh_obj)
 
             material_face_counts = calculate_face_counts(mesh_obj)
+            game_position = blender_to_game(mesh_obj.location) * (
+                MODEL_EXPORT_SCALE * bpy.context.scene.unit_settings.scale_length)
 
             mdn_mesh = MDN_Mesh(
                 groupIdx=mesh_to_group.get(mesh_obj, 0),
                 flag=0,
                 numFaceIdx=len(material_face_counts),
-                faceIdx=sum(len(m.material_slots) for m in meshes[:mesh_idx]),
+                faceIdx=sum(len(calculate_face_counts(m)) for m in meshes[:mesh_idx]),
                 vertexDefIdx=meshes.index(mesh_obj),
                 skinIdx=mesh_obj.get("mdn_skin_index", 0),
                 numVertex=len(mesh.vertices),
                 pad=0,
                 max=bounds_max + [1.0],
                 min=bounds_min + [1.0],
-                pos=list(mesh_obj.location) + [1.0]
+                pos=list(game_position) + [1.0]
             )
             mdn_mesh.write(writer)
         
@@ -933,13 +939,12 @@ class ExportMDN(Operator, ExportHelper):
         # 10. Write face buffer
         writer.pad_to_alignment(16)
         header.faceBufferOffset = writer.get_offset()
-        total_face_buffer_size = 0
 
         for mesh_obj in meshes:
-            face_size = write_face_buffer(writer, mesh_obj)
-            total_face_buffer_size += face_size
+            write_face_buffer(writer, mesh_obj)
 
-        header.faceBufferSize = total_face_buffer_size
+        writer.pad_to_alignment(16)
+        header.faceBufferSize = writer.get_offset() - header.faceBufferOffset
         
         # Update header
         header.fileSize = writer.get_offset()
