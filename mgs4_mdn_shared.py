@@ -26,6 +26,9 @@ def strcode_from_name(name):
             return strcode(name)
     except ValueError:
         return 0xDEADBEEF
+
+def print_farts():
+    print("farts")
         
 def float_to_half(value):
     packed = struct.pack('f', value)
